@@ -27,7 +27,7 @@ _NS = "analytics"
 
 
 def _externaldb_path(project: str = _NS) -> Path:  # noqa: ARG001
-    return DATA_DIR / _NS / "externaldb.json"
+    return DATA_DIR / "external" / "externaldb.json"
 
 
 def load_external_db(project: str) -> list[dict]:

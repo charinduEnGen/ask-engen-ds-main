@@ -334,47 +334,37 @@ async def confirm(body: ConfirmRequest) -> ConfirmResponse:
     return ConfirmResponse(success=True, project_name=_NS, tables=saved_tables)
 
 
-class ExternalSourceRequest(BaseModel):
-    project_name: str
+class ExternalSourceItem(BaseModel):
     key_name: str
     description: str = ""
     link: str = ""
 
 
-class ExternalSourceResponse(BaseModel):
-    success: bool
-    project_name: str
-    key_name: str
-    files: list[dict[str, Any]]
+@router.post("/external")
+async def register_external_source(body: list[ExternalSourceItem]) -> dict:
+    if not body:
+        raise HTTPException(status_code=400, detail="At least one source item is required")
 
+    sources = load_external_db("")
+    saved_keys: list[str] = []
+    for item in body:
+        key_name = item.key_name.strip()
+        if not key_name:
+            continue
+        entry = {"key_name": key_name, "description": item.description, "link": item.link}
+        replaced = False
+        for i, s in enumerate(sources):
+            if s.get("key_name") == key_name:
+                sources[i] = entry
+                replaced = True
+                break
+        if not replaced:
+            sources.append(entry)
+        saved_keys.append(key_name)
+        console_log("external", "EXTERNAL_SOURCE", f"registered key={key_name} link={item.link} replaced={replaced}")
 
-@router.post("/external", response_model=ExternalSourceResponse)
-async def register_external_source(body: ExternalSourceRequest) -> ExternalSourceResponse:
-    project = body.project_name.strip()
-    key_name = body.key_name.strip()
-    if not project or not key_name:
-        raise HTTPException(status_code=400, detail="project_name and key_name are required")
-    if not body.link.strip():
-        raise HTTPException(status_code=400, detail="link (URL) is required")
-
-    sources = load_external_db(project)
-    replaced = False
-    entry = {
-        "key_name": key_name,
-        "description": body.description,
-        "link": body.link.strip(),
-    }
-    for i, s in enumerate(sources):
-        if s.get("key_name") == key_name:
-            sources[i] = entry
-            replaced = True
-            break
-    if not replaced:
-        sources.append(entry)
-    save_external_db(project, sources)
-
-    console_log(project, "EXTERNAL_SOURCE", f"registered key={key_name} link={body.link} replaced={replaced}")
-    return ExternalSourceResponse(success=True, project_name=project, key_name=key_name, files=[])
+    save_external_db("", sources)
+    return {"success": True, "saved": saved_keys, "files": []}
 
 
 @router.get("/external/{project}")
