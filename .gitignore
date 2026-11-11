@@ -8,3 +8,4 @@ __pycache__/
 data/
 error.log
 combined.log
+.claude/
