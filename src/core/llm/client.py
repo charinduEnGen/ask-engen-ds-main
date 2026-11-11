@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.config import settings
+from src.core.llm import store as llm_store
 from src.utils.logging_utils import console_log
 
 
@@ -128,10 +129,11 @@ def _map_anthropic_exception(exc: Exception) -> LLMProviderError:
     return LLMProviderError(code, message)
 
 
-def _call_anthropic(system: str, user: str, max_tokens: int) -> LLMResult:
+def _call_anthropic(mode: str, system: str, user: str, max_tokens: int) -> LLMResult:
     import anthropic
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    api_key = llm_store.get_key(mode, "anthropic") or settings.anthropic_api_key
+    client = anthropic.Anthropic(api_key=api_key)
     try:
         response = client.messages.create(
             model=settings.anthropic_model,
@@ -174,7 +176,8 @@ def _call_gemini(
     import google.generativeai as genai
     from google.api_core.exceptions import GoogleAPICallError
 
-    genai.configure(api_key=settings.gemini_api_key)
+    api_key = llm_store.get_key(mode, "gemini") or settings.gemini_api_key
+    genai.configure(api_key=api_key)
 
     cached_content = None
     if static_context and settings.gemini_context_cache_enabled:
@@ -239,7 +242,7 @@ def call_llm(
         )
 
     if settings.llm_provider == "anthropic":
-        return _call_anthropic(system, user, max_tokens)
+        return _call_anthropic(mode, system, user, max_tokens)
     if settings.llm_provider == "gemini":
         return _call_gemini(
             mode, system, user, max_tokens, gemini_model or settings.gemini_model_data_processing, gemini_static_context

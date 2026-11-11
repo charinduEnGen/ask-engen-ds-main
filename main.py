@@ -10,6 +10,7 @@ import src.services.analytics  # noqa: F401 — triggers self-registration in sr
 from src.routes.dashboard import router as dashboard_router
 from src.routes.glossary import router as glossary_router
 from src.routes.knowledge import router as knowledge_router
+from src.routes.llm import router as llm_router
 from src.routes.predict import router as predict_router
 from src.schemas.user_request import QueryResponse, UserRequest
 from src.core.session import memory as session_memory
@@ -52,6 +53,7 @@ app = FastAPI(title="Ask Engen Analytics Engine", lifespan=lifespan)
 app.include_router(dashboard_router)
 app.include_router(glossary_router)
 app.include_router(knowledge_router)
+app.include_router(llm_router)
 app.include_router(predict_router)
 
 for _svc_router in get_all_routers():
