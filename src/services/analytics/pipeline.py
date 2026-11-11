@@ -28,6 +28,7 @@ from src.services.analytics import steps
 from src.core.llm.gate import _llm_semaphore  # noqa: F401 - re-exported; see gate module docstring
 from src.services.analytics.steps import Agent1Outcome, IntentionOutcome, run_rag_query_agent
 from src.schemas.user_request import QueryResponse, UserRequest
+from src.schemas.query_stages import EnrichRequest, SqlStageResponse
 from src.services.analytics.tools import response_builder
 from src.utils import kb_loader, masking
 from src.core.session import memory as session_memory
@@ -531,3 +532,290 @@ def _response_shape(response: QueryResponse) -> str:
     if response.answer.table:
         return "text_table" if response.answer.text.get("content") else "table"
     return "text"
+
+
+async def run_sql_stage(
+    user_request: UserRequest, background_tasks: BackgroundTasks
+) -> SqlStageResponse:
+    """Stage 1: build context, classify intent, generate SQL.
+
+    Returns is_complete=True  for out-of-scope / external / rag answers (fully
+    resolved here — BE returns the embedded response directly).
+    Returns is_complete=False with sql set for in-scope internal queries: BE
+    executes the SQL and calls run_enrich_stage with the rows.
+    """
+    start = time.perf_counter()
+    timer = StageTimer()
+    mode = user_request.mode
+    answer_id = generate_answer_id()
+    question_id = user_request.question_id or generate_question_id()
+
+    console_log(mode, "SQL_STAGE", f"answer_id={answer_id} question_id={question_id} query={user_request.query!r}")
+
+    chat_expire = session_memory.is_chat_expired(user_request.user_id, user_request.session_id, mode)
+    max_context_window = session_memory.is_context_window_full(user_request.user_id, user_request.session_id, mode)
+
+    if chat_expire or max_context_window:
+        response = response_builder.build_response(
+            answer_id=answer_id, question_id=question_id,
+            user_id=user_request.user_id, session_id=user_request.session_id, mode=mode,
+            max_context_window=max_context_window, chat_expire=chat_expire,
+            text_content=None, table=None, chart=None, follow_ups=[], merchant_disambiguation=None,
+        )
+        return SqlStageResponse(
+            answer_id=answer_id, question_id=question_id, is_complete=True,
+            max_context_window=max_context_window, chat_expire=chat_expire, response=response,
+        )
+
+    with timer.track("build_context"):
+        schema = kb_loader.load_schema(mode)
+        analytics_patterns = kb_loader.load_analytics_patterns(mode)
+        data_context = kb_loader.render_prompt_summary(mode)
+        history = session_memory.get_history(user_request.user_id, user_request.session_id, mode)
+        memory_context = session_memory.format_history_for_prompt(history)
+
+    with timer.track("intention_classification"):
+        intention = await steps.run_intention_classifier(
+            mode=mode, query=user_request.query, memory_context=memory_context,
+            answer_id=answer_id, user_id=user_request.user_id, session_id=user_request.session_id,
+        )
+
+    # External and RAG intents are fully resolved here
+    if intention.intent == "rag":
+        console_log(mode, "SQL_STAGE", "rag intent — resolving inline")
+        with timer.track("rag_query"):
+            try:
+                text_content, follow_ups = await run_rag_query_agent(
+                    mode=mode, query=user_request.query, answer_id=answer_id,
+                    user_id=user_request.user_id, session_id=user_request.session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                text_content = "An error occurred searching the knowledge base."
+                follow_ups = []
+        response = response_builder.build_response(
+            answer_id=answer_id, question_id=question_id,
+            user_id=user_request.user_id, session_id=user_request.session_id, mode=mode,
+            max_context_window=False, chat_expire=False,
+            text_content=text_content, table=None, chart=None,
+            follow_ups=follow_ups or None, merchant_disambiguation=None,
+        )
+        background_tasks.add_task(
+            session_memory.append_turn, user_id=user_request.user_id,
+            session_id=user_request.session_id, mode=mode, answer_id=answer_id,
+            query=user_request.query, answer=response.answer.model_dump(exclude_none=True),
+            response_type="text", mask_map=None, pending_disambiguation=None,
+        )
+        return SqlStageResponse(answer_id=answer_id, question_id=question_id, is_complete=True, response=response)
+
+    if intention.intent == "external" and intention.source_key:
+        console_log(mode, "SQL_STAGE", f"external intent source_key={intention.source_key} — resolving inline")
+        internal_df: pd.DataFrame | None = None
+        if _is_comparison_query(user_request.query):
+            engine = get_engine(mode)
+            try:
+                internal_outcome = await steps.run_data_processing_agent(
+                    mode=mode, query=user_request.query, schema=schema, data_context=data_context,
+                    analytics_patterns=analytics_patterns, memory_context=memory_context, engine=engine,
+                    user_id=user_request.user_id, session_id=user_request.session_id, answer_id=answer_id,
+                )
+                if internal_outcome.kind == "result" and not internal_outcome.result_df.empty:
+                    internal_df = internal_outcome.result_df
+            except Exception as exc:  # noqa: BLE001
+                console_log(mode, "SQL_STAGE", f"internal fetch for comparison failed: {exc}")
+        try:
+            text_content, follow_ups = await steps.run_external_query_agent(
+                mode=mode, query=user_request.query, source_key=intention.source_key,
+                answer_id=answer_id, user_id=user_request.user_id, session_id=user_request.session_id,
+                internal_df=internal_df,
+            )
+        except Exception as exc:  # noqa: BLE001
+            text_content = "An error occurred reading the external data source."
+            follow_ups = []
+        response = response_builder.build_response(
+            answer_id=answer_id, question_id=question_id,
+            user_id=user_request.user_id, session_id=user_request.session_id, mode=mode,
+            max_context_window=False, chat_expire=False,
+            text_content=text_content, table=None, chart=None,
+            follow_ups=follow_ups or None, merchant_disambiguation=None,
+        )
+        background_tasks.add_task(
+            session_memory.append_turn, user_id=user_request.user_id,
+            session_id=user_request.session_id, mode=mode, answer_id=answer_id,
+            query=user_request.query, answer=response.answer.model_dump(exclude_none=True),
+            response_type="text", mask_map=None, pending_disambiguation=None,
+        )
+        return SqlStageResponse(answer_id=answer_id, question_id=question_id, is_complete=True, response=response)
+
+    # Internal intent: generate SQL only — no execution here
+    reply_to_mask_key = None
+    if user_request.answerId:
+        prior_mask_map = session_memory.get_mask_map_for_answer(
+            user_request.user_id, user_request.session_id, mode, user_request.answerId
+        )
+        if prior_mask_map:
+            reply_to_mask_key = masking.from_storage(prior_mask_map, key_id=f"reply_to:{user_request.answerId}")
+
+    token_limit_hit = False
+    provider_error_message: Optional[str] = None
+
+    try:
+        with timer.track("agent1_sql_generation"):
+            outcome = await steps.run_data_processing_agent(
+                mode=mode, query=user_request.query, schema=schema, data_context=data_context,
+                analytics_patterns=analytics_patterns, memory_context=memory_context,
+                engine=None,  # no execution at this stage
+                user_id=user_request.user_id, session_id=user_request.session_id,
+                reply_to_mask_key=reply_to_mask_key, answer_id=answer_id,
+            )
+    except TokenLimitExceededError:
+        token_limit_hit = True
+        outcome = Agent1Outcome(kind="out_of_scope", out_of_scope_reason="token limit exceeded", scope_category="system_error")
+    except LLMProviderError as exc:
+        provider_error_message = _provider_error_message(exc)
+        outcome = Agent1Outcome(kind="out_of_scope", out_of_scope_reason=f"provider error ({exc.code})", scope_category="system_error")
+    except asyncio.TimeoutError:
+        provider_error_message = ERROR_FRIENDLY_MESSAGES["deadline_exceeded"]
+        outcome = Agent1Outcome(kind="out_of_scope", out_of_scope_reason="LLM timed out", scope_category="system_error")
+
+    if outcome.kind != "result":
+        # Out-of-scope: generate user-facing reply and return complete
+        if token_limit_hit:
+            text_content = _TOKEN_LIMIT_MESSAGE
+        elif provider_error_message:
+            text_content = provider_error_message
+        else:
+            try:
+                text_content = await steps.run_out_of_scope_response_agent(
+                    mode=mode, query=user_request.query,
+                    scope_category=outcome.scope_category or "unsupported_data",
+                    out_of_scope_reason=outcome.out_of_scope_reason or "",
+                    answer_id=answer_id, user_id=user_request.user_id, session_id=user_request.session_id,
+                )
+            except Exception:  # noqa: BLE001
+                text_content = _TOKEN_LIMIT_MESSAGE
+        response = response_builder.build_response(
+            answer_id=answer_id, question_id=question_id,
+            user_id=user_request.user_id, session_id=user_request.session_id, mode=mode,
+            max_context_window=max_context_window or token_limit_hit, chat_expire=chat_expire,
+            text_content=text_content, table=None, chart=None, follow_ups=None, merchant_disambiguation=None,
+        )
+        background_tasks.add_task(
+            session_memory.append_turn, user_id=user_request.user_id,
+            session_id=user_request.session_id, mode=mode, answer_id=answer_id,
+            query=user_request.query, answer=response.answer.model_dump(exclude_none=True),
+            response_type="text", mask_map=None, pending_disambiguation=None,
+        )
+        if outcome.failed_attempts:
+            background_tasks.add_task(
+                log_agent1_failure, user_request.user_id, user_request.session_id, answer_id,
+                user_request.query, mode, outcome.scope_category or "system_error",
+                outcome.out_of_scope_reason or "", outcome.failed_attempts,
+            )
+        return SqlStageResponse(
+            answer_id=answer_id, question_id=question_id, is_complete=True,
+            max_context_window=max_context_window or token_limit_hit, response=response,
+        )
+
+    # In-scope: return demasked SQL for BE to execute
+    exec_sql = outcome.query_used  # already demasked in run_data_processing_agent
+    console_log(mode, "SQL_STAGE", f"returning sql to BE for execution: {exec_sql!r}")
+
+    total_seconds = round(time.perf_counter() - start, 4)
+    background_tasks.add_task(log_timing, user_request.user_id, user_request.session_id, answer_id, user_request.query, timer.stages, total_seconds, mode)
+
+    return SqlStageResponse(answer_id=answer_id, question_id=question_id, is_complete=False, sql=exec_sql)
+
+
+async def run_enrich_stage(
+    req: EnrichRequest, background_tasks: BackgroundTasks
+) -> QueryResponse:
+    """Stage 2: receive SQL result rows from BE, run enrichment, write memory."""
+    start = time.perf_counter()
+    timer = StageTimer()
+    mode = req.mode
+    answer_id = req.answer_id
+    question_id = req.question_id
+
+    console_log(mode, "ENRICH_STAGE", f"answer_id={answer_id} row_count={req.row_count}")
+
+    with timer.track("build_context"):
+        schema = kb_loader.load_schema(mode)
+
+    result_df = pd.DataFrame(req.rows)
+    row_count = req.row_count
+
+    mask_key = masking.MaskKey(key_id=f"{req.user_id}:{req.session_id}:{mode}:{question_id}:{answer_id}")
+
+    text_content: Optional[str] = None
+    table: Optional[dict] = None
+    chart: Optional[dict] = None
+    follow_ups: Optional[list] = None
+
+    try:
+        with timer.track("build_response"):
+            if row_count <= settings.small_result_threshold:
+                console_log(mode, "ENRICH_STAGE", f"{row_count} row(s) <= threshold: running enrichment agent")
+                mask_key = masking.build_mask_key(
+                    user_id=req.user_id, session_id=req.session_id, mode=mode,
+                    question_id=question_id, answer_id=answer_id,
+                    df=result_df, secure_cols=masking.secure_columns_for(schema),
+                )
+                masked_df = masking.mask_dataframe(result_df, mask_key)
+                text_content, table, chart, follow_ups = await steps.run_enrichment_agent(
+                    mode=mode, query=req.query, schema=schema, result_df=masked_df,
+                    answer_id=answer_id, user_id=req.user_id, session_id=req.session_id,
+                )
+                text_content = masking.demask_json(text_content, mask_key)
+                table = masking.demask_json(table, mask_key)
+                chart = masking.demask_json(chart, mask_key)
+                follow_ups = masking.demask_json(follow_ups, mask_key)
+            else:
+                console_log(mode, "ENRICH_STAGE", f"{row_count} row(s) > threshold: followups-only + full table")
+                table_title, follow_ups = await steps.run_followups_only(
+                    mode=mode, query=req.query, schema=schema,
+                    user_id=req.user_id, session_id=req.session_id, answer_id=answer_id,
+                )
+                table = response_builder.build_table_payload(
+                    result_df, page=1, page_size=settings.default_page_size, paginated=False,
+                    title=table_title or req.query,
+                )
+                mask_key = masking.build_mask_key(
+                    user_id=req.user_id, session_id=req.session_id, mode=mode,
+                    question_id=question_id, answer_id=answer_id,
+                    df=pd.DataFrame(table["rows"]),
+                    secure_cols=masking.secure_columns_for(schema),
+                )
+    except TokenLimitExceededError:
+        text_content = _TOKEN_LIMIT_MESSAGE
+        table = None; chart = None; follow_ups = None
+    except LLMProviderError as exc:
+        text_content = _provider_error_message(exc)
+        table = None; chart = None; follow_ups = None
+    except asyncio.TimeoutError:
+        text_content = ERROR_FRIENDLY_MESSAGES["deadline_exceeded"]
+        table = None; chart = None; follow_ups = None
+
+    response = response_builder.build_response(
+        answer_id=answer_id, question_id=question_id,
+        user_id=req.user_id, session_id=req.session_id, mode=mode,
+        max_context_window=False, chat_expire=False,
+        text_content=text_content, table=table, chart=chart,
+        follow_ups=follow_ups, merchant_disambiguation=None,
+    )
+
+    total_seconds = round(time.perf_counter() - start, 4)
+    console_log(mode, "ENRICH_STAGE", f"shape={_response_shape(response)} total_seconds={total_seconds}")
+
+    memory_answer = response.answer.model_dump(exclude_none=True)
+    memory_answer = masking.mask_json(memory_answer, mask_key)
+
+    background_tasks.add_task(
+        session_memory.append_turn, user_id=req.user_id, session_id=req.session_id, mode=mode,
+        answer_id=answer_id, query=req.query, answer=memory_answer,
+        response_type=_response_shape(response),
+        mask_map=masking.to_storage(mask_key) if not mask_key.is_empty() else None,
+        pending_disambiguation=None,
+    )
+    background_tasks.add_task(log_timing, req.user_id, req.session_id, answer_id, req.query, timer.stages, total_seconds, mode)
+
+    return response

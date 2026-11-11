@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     # many rows runs the enrichment agent (narrative + table/chart); above
     # it, every size — 21 rows or 20,000 — gets the same follow-ups-only
     # agent + full table (client-paged) treatment. See query_orchestrator.
-    small_result_threshold: int = 20
+    small_result_threshold: int = 50
     default_page_size: int = 5
 
     # Agent 1 retries when its generated SQL fails to execute.

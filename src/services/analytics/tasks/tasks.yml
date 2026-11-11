@@ -288,7 +288,8 @@ schema_discovery_task:
     for the user to review before it's persisted.
 
   input: |
-    Project: "{{project_name}}"
+    Business Scope: "{{business_scope}}"
+    User Story: "{{user_story}}"
 
     Tables (name, column names, pandas dtypes, and up to {{sample_row_count}}
     sample rows per table):

@@ -13,6 +13,8 @@ from src.routes.knowledge import router as knowledge_router
 from src.routes.llm import router as llm_router
 from src.routes.predict import router as predict_router
 from src.schemas.user_request import QueryResponse, UserRequest
+from src.schemas.query_stages import EnrichRequest, SqlStageResponse
+from src.services.analytics.pipeline import run_enrich_stage, run_sql_stage
 from src.core.session import memory as session_memory
 from src.services.registry import get_all_routers, get_pipeline
 from src.utils.logging_utils import log_timestamp
@@ -72,6 +74,18 @@ async def query_by_project(project: str, user_request: UserRequest, background_t
 async def query_default(user_request: UserRequest, background_tasks: BackgroundTasks) -> QueryResponse:
     pipeline_fn = get_pipeline(user_request.mode or "analytics") or get_pipeline("analytics")
     return await pipeline_fn(user_request, background_tasks)
+
+
+@app.post("/query/{project}/sql", response_model=SqlStageResponse)
+async def query_sql_stage(project: str, user_request: UserRequest, background_tasks: BackgroundTasks) -> SqlStageResponse:
+    if not user_request.mode:
+        user_request.mode = project
+    return await run_sql_stage(user_request, background_tasks)
+
+
+@app.post("/query/{project}/enrich", response_model=QueryResponse)
+async def query_enrich_stage(project: str, req: EnrichRequest, background_tasks: BackgroundTasks) -> QueryResponse:
+    return await run_enrich_stage(req, background_tasks)
 
 
 @app.get("/health")

@@ -55,7 +55,7 @@ async def run_data_processing_agent(
     data_context: str,
     analytics_patterns: list[dict],
     memory_context: str,
-    engine: Engine,
+    engine: Engine | None,
     user_id: str,
     session_id: str,
     answer_id: str,
@@ -166,6 +166,11 @@ async def run_data_processing_agent(
                     "MASKING",
                     f"attempt {attempt}: demasked pseudonym(s) before execution:\n{exec_sql}",
                 )
+
+        # SQL-only mode: return SQL without executing (BE will execute it)
+        if engine is None:
+            console_log(mode, "AGENT1_QUERY", f"attempt {attempt}: engine=None, returning sql without execution")
+            return Agent1Outcome(kind="result", result_df=pd.DataFrame(), query_used=exec_sql)
 
         exec_outcome = await run_pandas_exec(execute_sql_query, exec_sql, engine)
         if isinstance(exec_outcome, pd.DataFrame):

@@ -162,15 +162,60 @@ async def ingest(project_name: str = Form(...), files: list[UploadFile] = File(.
     )
 
 
+class IngestJsonTable(BaseModel):
+    table: str
+    source_file: str = ""
+    sheet: str = ""
+    columns: list[dict[str, Any]]
+
+
+class IngestJsonRequest(BaseModel):
+    project_name: str
+    upload_id: str
+    business_scope: str = ""
+    user_story: str = ""
+    tables: list[IngestJsonTable]
+
+
+@router.post("/ingest-json", response_model=IngestResponse)
+async def ingest_json(body: IngestJsonRequest) -> IngestResponse:
+    project = body.project_name.strip()
+    if not project:
+        raise HTTPException(status_code=400, detail="project_name is required")
+    if not body.tables:
+        raise HTTPException(status_code=400, detail="At least one table is required")
+
+    tables_preview = [t.model_dump() for t in body.tables]
+
+    discovered = await _run_schema_discovery(
+        project, tables_preview, body.business_scope, body.user_story
+    )
+
+    return IngestResponse(
+        project_name=project,
+        upload_id=body.upload_id,
+        tables=discovered.get("tables", []),
+        relationships=discovered.get("relationships", []),
+        data_context=discovered.get("data_context", {}),
+        patterns=discovered.get("patterns", []),
+    )
+
+
 def _strip_fences(text: str) -> str:
     return _FENCE_RE.sub("", text).strip()
 
 
-async def _run_schema_discovery(project: str, tables_preview: list[dict[str, Any]]) -> dict:
+async def _run_schema_discovery(
+    project: str,
+    tables_preview: list[dict[str, Any]],
+    business_scope: str = "",
+    user_story: str = "",
+) -> dict:
     system_prompt = prompt_loader.build_agent_system_prompt("schema_relation_builder_agent")
     prompt = prompt_loader.render_task_prompt(
         "schema_discovery_task",
-        project_name=project,
+        business_scope=business_scope or project,
+        user_story=user_story,
         sample_row_count=str(settings.schema_sample_rows),
         tables_preview=json.dumps(tables_preview, ensure_ascii=False),
     )
@@ -258,56 +303,28 @@ class ConfirmResponse(BaseModel):
 async def confirm(body: ConfirmRequest) -> ConfirmResponse:
     if not body.project_name.strip():
         raise HTTPException(status_code=400, detail="project_name is required")
+    if not body.tables:
+        raise HTTPException(status_code=400, detail="At least one table is required")
 
-    staging_dir = _staging_dir(body.upload_id)
-    if not staging_dir.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Upload not found or already confirmed — re-run /datasets/ingest first",
-        )
-
-    staged_files = list(staging_dir.iterdir())
-    if not staged_files:
-        raise HTTPException(status_code=400, detail="Staged upload directory is empty")
-
-    reset_engine(_NS)
-    engine = get_engine(_NS)
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     saved_tables: list[str] = []
-    table_facts: dict[str, dict[str, Any]] = {}
+
+    # BE passes per-table facts (row_count, source_file) inside data_context.tables when available
+    be_table_facts: dict[str, Any] = body.data_context.get("tables") or {}
 
     for table_cfg in body.tables:
         table_name = table_cfg.get("name")
         if not table_name:
             continue
-
-        source_file, sheet_name = _find_source(table_name, staged_files)
-        if source_file is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Could not match table '{table_name}' back to an uploaded file/sheet",
-            )
-
-        full_df = (
-            pd.read_csv(source_file) if sheet_name is None else pd.read_excel(source_file, sheet_name=sheet_name)
-        )
-        full_df.to_sql(table_name, engine, if_exists="replace", index=False)
-        _create_indexes_heuristic(engine, table_name, list(full_df.columns))
-
         table_dir = _table_dir(table_name)
         table_dir.mkdir(parents=True, exist_ok=True)
         (table_dir / "schema.json").write_text(
             json.dumps(
-                {"type": table_cfg.get("type"), "columns": table_cfg.get("columns", [])}, indent=2
+                {"type": table_cfg.get("type"), "columns": table_cfg.get("columns", [])},
+                indent=2,
             ),
             encoding="utf-8",
         )
-
-        table_facts[table_name] = {
-            "row_count": len(full_df),
-            "source_file": source_file.name,
-            "sheet": sheet_name,
-        }
         saved_tables.append(table_name)
 
     ns_dir = DATA_DIR / _NS
@@ -319,7 +336,7 @@ async def confirm(body: ConfirmRequest) -> ConfirmResponse:
                 "currency": body.data_context.get("currency"),
                 "time_grain": body.data_context.get("time_grain", "unknown"),
                 "notes": body.data_context.get("notes", []),
-                "tables": table_facts,
+                "tables": be_table_facts or {t: {} for t in saved_tables},
                 "last_refreshed": now_iso,
             },
             indent=2,
@@ -329,9 +346,65 @@ async def confirm(body: ConfirmRequest) -> ConfirmResponse:
     (ns_dir / "patterns.json").write_text(json.dumps({"patterns": body.patterns}, indent=2), encoding="utf-8")
     (ns_dir / "relationships.json").write_text(json.dumps({"relationships": body.relationships}, indent=2), encoding="utf-8")
 
-    shutil.rmtree(staging_dir, ignore_errors=True)
-
     return ConfirmResponse(success=True, project_name=_NS, tables=saved_tables)
+
+
+class DeleteTableResponse(BaseModel):
+    success: bool
+    project_name: str
+    table_name: str
+
+
+@router.delete("/{project}/table/{table_name}", response_model=DeleteTableResponse)
+async def delete_table(project: str, table_name: str) -> DeleteTableResponse:
+    """Remove a single table from DS metadata (schema dir + data_context + relationships + patterns)."""
+    ns_dir = DATA_DIR / _NS
+
+    # 1. Remove table schema directory
+    table_dir = _table_dir(table_name)
+    if table_dir.exists():
+        shutil.rmtree(table_dir)
+
+    # 2. Update data_context.json
+    dc_path = ns_dir / "data_context.json"
+    if dc_path.exists():
+        try:
+            dc = json.loads(dc_path.read_text(encoding="utf-8"))
+            tables = dc.get("tables") or {}
+            tables.pop(table_name, None)
+            dc["tables"] = tables
+            dc_path.write_text(json.dumps(dc, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    # 3. Update relationships.json — remove any relationship involving this table
+    rel_path = ns_dir / "relationships.json"
+    if rel_path.exists():
+        try:
+            rel_data = json.loads(rel_path.read_text(encoding="utf-8"))
+            rels = rel_data.get("relationships") or []
+            rels = [
+                r for r in rels
+                if r.get("from_table") != table_name and r.get("to_table") != table_name
+            ]
+            rel_data["relationships"] = rels
+            rel_path.write_text(json.dumps(rel_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    # 4. Update patterns.json — remove patterns that reference this table
+    pat_path = ns_dir / "patterns.json"
+    if pat_path.exists():
+        try:
+            pat_data = json.loads(pat_path.read_text(encoding="utf-8"))
+            patterns = pat_data.get("patterns") or []
+            patterns = [p for p in patterns if table_name not in json.dumps(p)]
+            pat_data["patterns"] = patterns
+            pat_path.write_text(json.dumps(pat_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    return DeleteTableResponse(success=True, project_name=_NS, table_name=table_name)
 
 
 class ExternalSourceItem(BaseModel):
