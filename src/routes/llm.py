@@ -14,14 +14,6 @@ from src.core.llm import store as llm_store
 # Keyed by the exact model ID in PUBLIC_MODEL_POOL.
 # ---------------------------------------------------------------------------
 _PUBLIC_MODEL_DISPLAY: dict[str, dict] = {
-    "google/gemma-4-31b-it:free": {
-        "name": "Google Gemma 4 31B",
-        "provider_name": "Google",
-        "provider_key": "google",
-        "latency": "~800ms",
-        "latency_ms": 800,
-        "released": "May 2025",
-    },
     "nvidia/nemotron-3-ultra-550b-a55b:free": {
         "name": "NVIDIA Nemotron Ultra 550B",
         "provider_name": "NVIDIA",

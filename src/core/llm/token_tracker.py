@@ -16,11 +16,10 @@ _lock = threading.Lock()
 _USAGE_FILE = DATA_DIR / "token_usage.json"
 _ROTATION_THRESHOLD = 0.75
 
-# Rotation order: Gemma → Nemotron Ultra → Nemotron Lightning.
+# Rotation order: Nemotron Ultra → Nemotron Lightning.
 # weekly_limit: OpenRouter free-tier weekly caps in tokens.
 # context_window: model's actual context window in tokens.
 PUBLIC_MODEL_POOL: list[dict] = [
-    {"id": "google/gemma-4-31b-it:free",             "weekly_limit": 613_000_000,       "context_window": 262_144},
     {"id": "nvidia/nemotron-3-ultra-550b-a55b:free",  "weekly_limit": 3_460_000_000_000, "context_window": 1_048_576},
     {"id": "nvidia/nemotron-3.5-lightning:free",      "weekly_limit": 1_200_000_000_000, "context_window": 1_048_576},
 ]
