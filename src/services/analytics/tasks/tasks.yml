@@ -109,6 +109,10 @@ data_analysis_task:
       any entity value that appears ONLY in conversation history.
     - CASE-INSENSITIVE: Always use LOWER(column) = LOWER('value') (or LIKE
       for substring matches) for text filters.
+    - COLUMN IDENTIFIERS: Always wrap column names that contain spaces or
+      special characters with double quotes — e.g. "Branch Name", t."Branch Name".
+      Never use square-bracket notation ([Branch Name]) — that is T-SQL syntax
+      and will cause a syntax error in SQLite.
     - JOINS: when the question spans more than one table, join using the
       relationships listed in the schema above — never invent a join
       condition that isn't backed by a listed relationship.

@@ -312,6 +312,14 @@ async def confirm(body: ConfirmRequest) -> ConfirmResponse:
     # BE passes per-table facts (row_count, source_file) inside data_context.tables when available
     be_table_facts: dict[str, Any] = body.data_context.get("tables") or {}
 
+    # Locate staged files for this upload so we can load them into SQLite
+    staging_dir = _staging_dir(body.upload_id)
+    staged_files = sorted(staging_dir.glob("*.*")) if staging_dir.exists() else []
+
+    # Reset any stale cached engine so we always write to a fresh DB
+    reset_engine(_NS)
+    engine = get_engine(_NS)
+
     for table_cfg in body.tables:
         table_name = table_cfg.get("name")
         if not table_name:
@@ -326,6 +334,22 @@ async def confirm(body: ConfirmRequest) -> ConfirmResponse:
             encoding="utf-8",
         )
         saved_tables.append(table_name)
+
+        # Load the actual data rows into SQLite
+        if staged_files:
+            source_path, sheet_name = _find_source(table_name, staged_files)
+            if source_path is not None:
+                try:
+                    sheets = _read_sheets(source_path)
+                    df = sheets.get(sheet_name) if sheet_name is not None else next(iter(sheets.values()), None)
+                    if df is not None and not df.empty:
+                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        _create_indexes_heuristic(engine, table_name, list(df.columns))
+                        console_log(_NS, "CONFIRM", f"loaded {len(df)} rows into table={table_name}")
+                except Exception as exc:  # noqa: BLE001
+                    console_log(_NS, "CONFIRM", f"WARNING: could not load {table_name} into SQLite: {exc}")
+            else:
+                console_log(_NS, "CONFIRM", f"WARNING: no staged source found for table={table_name}")
 
     ns_dir = DATA_DIR / _NS
     ns_dir.mkdir(parents=True, exist_ok=True)
@@ -345,6 +369,11 @@ async def confirm(body: ConfirmRequest) -> ConfirmResponse:
     )
     (ns_dir / "patterns.json").write_text(json.dumps({"patterns": body.patterns}, indent=2), encoding="utf-8")
     (ns_dir / "relationships.json").write_text(json.dumps({"relationships": body.relationships}, indent=2), encoding="utf-8")
+
+    # Clean up staging files now that data is in SQLite
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        console_log(_NS, "CONFIRM", f"cleaned staging upload_id={body.upload_id}")
 
     return ConfirmResponse(success=True, project_name=_NS, tables=saved_tables)
 
