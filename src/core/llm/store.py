@@ -40,3 +40,8 @@ def get_key(service_id: str, provider: str) -> Optional[str]:
         if entry.get("provider") == provider:
             return entry.get("api_key")
         return None
+
+
+def get_mode(service_id: str) -> Optional[str]:
+    with _lock:
+        return _configs.get(service_id, {}).get("mode")

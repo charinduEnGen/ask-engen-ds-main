@@ -49,6 +49,8 @@ class Settings(BaseSettings):
 
     # LLM provider — switch with LLM_PROVIDER env var, no code change needed.
     llm_provider: Literal["anthropic", "gemini"] = "gemini"
+    # Public-mode key — owned by DS, never sent from the backend.
+    open_router_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     anthropic_model: str = "claude-opus-5"
     gemini_api_key: Optional[str] = None

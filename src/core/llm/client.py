@@ -216,6 +216,28 @@ def _call_gemini(
     )
 
 
+def _call_openrouter_public(
+    mode: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    static_context: Optional[str],
+) -> LLMResult:
+    # Lazy import keeps circular-import risk zero: openrouter imports from this
+    # module, but only after this module is fully loaded.
+    from src.core.llm.openrouter import call_openrouter
+    from src.core.llm import token_tracker
+
+    if static_context:
+        user = f"{static_context}\n\n{user}"
+
+    active_model = token_tracker.get_active_model()
+    console_log(mode, "OPENROUTER", f"model={active_model}")
+    result = call_openrouter(system, user, active_model, max_tokens)
+    token_tracker.add_tokens(active_model, result.input_tokens + result.output_tokens)
+    return result
+
+
 def call_llm(
     mode: str,
     system: str,
@@ -240,6 +262,11 @@ def call_llm(
             f"Estimated input size (~{estimated_input_tokens} tokens) exceeds "
             f"llm_max_input_tokens ({settings.llm_max_input_tokens})"
         )
+
+    # Public mode: OpenRouter free-tier pool with weekly-token-based rotation.
+    # Checked before env-based routing so an admin save of mode=public overrides LLM_PROVIDER.
+    if llm_store.get_mode(mode) == "public":
+        return _call_openrouter_public(mode, system, user, max_tokens, gemini_static_context)
 
     if settings.llm_provider == "anthropic":
         return _call_anthropic(mode, system, user, max_tokens)
