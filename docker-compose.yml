@@ -1,0 +1,16 @@
+services:
+  analytics-engine:
+    build: .
+    ports:
+      - "5005:5005"
+    env_file:
+      - .env
+    volumes:
+      # data/<project>/ holds each project's SQLite db, per-table
+      # schema/data_context/patterns JSON, and sessions/ — all created at
+      # runtime via POST /datasets/ingest + /datasets/confirm. Mount it so
+      # projects survive a container restart.
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./costs:/app/costs
+    restart: unless-stopped

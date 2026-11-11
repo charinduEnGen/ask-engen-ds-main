@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-23T01:19:50.115025+00:00", "user_id": "6a60743ec76d4fbd8886a0bd", "session_id": "3750c55d-13db-4579-96f2-e54ff6d614dd", "answer_id": "ans_20261023_011944_d426ce", "mode": "Orient", "query": "hi", "stages_seconds": {"build_context": 0.0001, "agent1_query_build_and_execute": 3.7798, "out_of_scope_response": 1.3629}, "total_seconds": 5.1594}

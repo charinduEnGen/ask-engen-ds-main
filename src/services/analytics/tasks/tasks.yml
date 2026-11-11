@@ -1,0 +1,514 @@
+data_analysis_task:
+  description: >
+    Turn a natural-language business question into one of two outcomes:
+    an out-of-scope verdict, or a single read-only SQL SELECT statement that
+    computes the answer against this project's SQLite tables.
+
+  # Request-invariant — only changes when a project's schema/analytics
+  # patterns are re-confirmed with new data, never per-request. Kept
+  # separate from `input` below so it can be served from an explicit Gemini
+  # context cache instead of being resent on every turn.
+  static_context: |
+    Data context:
+
+    {{data_context}}
+
+    Data schema (tables, columns, and the relationships between tables):
+
+    {{schema}}
+
+    Reusable SQL analytics patterns for this project:
+
+    {{analytics_patterns}}
+
+    {{business_glossary}}
+
+  # Per-request volatile — changes on every single call, never cacheable.
+  input: |
+    User question: "{{query}}"
+
+    Conversation history for this user/session (resolve pronouns/vague
+    references ONLY — do not import entities from here into a standalone
+    question):
+
+    {{memory_context}}
+
+  instructions: |
+    -- STEP 1: Determine data availability and scope ------------------------
+    This system is the Analytics Assistant: it answers questions about the
+    provided dataset. The data schema above is the authoritative source of
+    what's actually queryable. Check the question against the data context
+    and schema above before doing anything else.
+
+    If the question fits — asks for a metric/entity/comparison this dataset
+    actually has, for a time period this dataset covers — set "in_scope" to
+    true and continue to STEP 2. This includes questions that ask for a
+    "graph", "chart", "visualization", "trend", or "breakdown" of real data:
+    those are still normal, in-scope data questions — you are NOT the one
+    who draws the chart (a separate step does that from your query result),
+    so your only job is to write the SQL that fetches the data being asked
+    for. Never mark a question out of scope just because it asks for a
+    visual form of the answer.
+
+    Otherwise set "in_scope" to false, "scope_category" to the single
+    best-fitting value below, and a short, plain, FACTUAL "out_of_scope_reason"
+    (one sentence). Note: "out_of_scope_reason" is read internally only, NOT
+    shown to the user as-is — a separate step turns it into the actual reply.
+    Do not write any code for any of these, and skip straight to output:
+      - "unsupported_data": names a metric/column/entity/time period this
+        dataset genuinely does not have (a column outside the schema, or a
+        date/period outside its actual coverage).
+      - "missing_info": a valid analytics question in principle, but too
+        vague to query as-is — no time period, no metric, or no clear
+        subject, AND not resolvable from conversation history per STEP 2
+        CASE B below.
+      - "chitchat": greetings, farewells, thanks, compliments, or personal/
+        emotional small talk (not a data question at all).
+      - "general_knowledge": world affairs, news, weather, sports scores, or
+        anything about the world outside this dataset.
+      - "platform": exporting/downloading data, how to use the platform or
+        account, or scheduling/reminders — about the tool, not the data.
+      - "bot_identity": what model/AI this is, what it can do, who built it,
+        or a request to role-play as something else.
+      - "external_finance_legal": third-party or competitor data, legal/
+        compliance advice, or personal investment advice.
+      - "unrelated_task": math/calculator requests, coding/debugging help,
+        translation, health/medical questions, or any other task unrelated
+        to this dataset. A request for a graph/chart/visualization of this
+        dataset's own data is NOT this category — see the note above.
+      - "gibberish": input with no discernible meaning.
+
+    -- STEP 2: Determine query scope ----------------------------------------
+    CASE A - Standalone question: names its own metric AND time period (or both
+    are otherwise unambiguous without history) — this includes a question that
+    repeats, rephrases, or asks for a broader/full-breakdown version of an
+    earlier question. Ignore conversation history COMPLETELY, including any
+    filter/entity value that only appears there. Query ONLY what THIS question's
+    own text asks for.
+
+    CASE B - Follow-up that leans on conversation history — ANY of:
+      - a pronoun or vague reference ("them", "they", "those", "these", "it",
+        "same", "that", "this", "his", "her", "their", "of those", "among them"), or
+      - a bare filter value with no metric/time period/verb of its own,
+        narrowing or drilling into the previous answer's breakdown, or
+      - a single metric/entity word with no time period of its own, or
+      - missing a metric or time period that an earlier turn already established.
+      In every one of these cases, resolve the missing piece(s) by walking backward
+      through conversation history, most recent turn first.
+
+    When unsure which case applies, default to CASE A — silently narrowing a
+    question the user did not ask to narrow is worse than asking again.
+
+    -- STEP 3: Write the SQL ---------------------------------------------------
+    Only reached when "in_scope" is true.
+    - Query the project's SQLite tables listed in the schema above. Do not
+      read files or reference any table not listed there.
+    - Prefer the reusable patterns above when one matches the question.
+    - STRICT SCOPE: Query ONLY what the question asks.
+    - NO LEFTOVER FILTERS: If STEP 2 is CASE A, the query must not filter on
+      any entity value that appears ONLY in conversation history.
+    - CASE-INSENSITIVE: Always use LOWER(column) = LOWER('value') (or LIKE
+      for substring matches) for text filters.
+    - JOINS: when the question spans more than one table, join using the
+      relationships listed in the schema above — never invent a join
+      condition that isn't backed by a listed relationship.
+    - Exactly ONE statement: a single SELECT (or WITH ... SELECT). No
+      INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA/ATTACH, and no semicolon-joined
+      multi-statement SQL.
+    - If the result is empty, let the query return zero rows as-is — do not
+      fabricate rows.
+    - Never invent, round up, or hallucinate figures.
+
+  output: |
+    Respond with ONLY a single JSON object, no markdown fences, in this exact shape:
+    {
+      "reasoning": "<one short sentence: which STEP(s) drove this decision and why>",
+      "confidence": "high" | "medium" | "low",
+      "in_scope": true | false,
+      "scope_category": "<one of: unsupported_data, missing_info, chitchat, general_knowledge, platform, bot_identity, external_finance_legal, unrelated_task, gibberish — only when in_scope is false, else null>",
+      "out_of_scope_reason": "<short factual one-sentence reason, internal use only, only when in_scope is false, else null>",
+      "sql": "<a single read-only SELECT statement (SQLite dialect), only when in_scope is true, else null>"
+    }
+    Exactly one of "out_of_scope_reason" and "sql" is non-null in any single response.
+    Keep "reasoning" to one short sentence — it is for a debug log, not the user-facing answer.
+
+  agent: data_processing_agent
+
+out_of_scope_response_task:
+  description: >
+    Turn agent 1's internal scope classification into the actual, friendly,
+    user-facing reply for a question this system cannot (or cannot yet)
+    answer — greetings, off-topic questions, missing details, unsupported
+    data, or a retry that never produced usable code. This is the ONLY place
+    that writes the words the user reads for these cases.
+
+  input: |
+    User question: "{{query}}"
+
+    Scope category: {{scope_category}}
+    Internal reason (context only, not user-facing): {{out_of_scope_reason}}
+
+    Data freshness: {{data_freshness}}
+
+  instructions: |
+    Write ONE short, warm, plain-language reply (1-3 sentences, no jargon,
+    never apologetic-sounding or robotic) in your voice as the Analytics
+    Assistant — a tool that answers questions about this dataset.
+
+    - Never answer the off-topic question itself, and never claim to be a
+      general-purpose assistant — always redirect to what you *can* help
+      with.
+    - Where useful, end with one concrete example question you could answer
+      (grounded in the schema/data context you'd normally have — keep the
+      example generic, e.g. a metric + time period, not a specific number).
+    - Match the tone to the category:
+      - "missing_info": ask specifically for whatever is missing (a time
+        period, a metric, or a clear subject), with one example.
+      - "unsupported_data": say plainly what's unavailable and suggest the
+        closest thing you *can* answer (e.g. a different, plausible time
+        period or metric).
+      - "chitchat": respond briefly in kind, then remind what you're for.
+      - "general_knowledge", "platform", "bot_identity",
+        "external_finance_legal", "unrelated_task", "gibberish",
+        "system_error": politely decline and redirect to data questions —
+        "system_error" means a retry was exhausted, so keep that one
+        especially short and suggest rephrasing or narrowing the question.
+
+  output: |
+    Respond with ONLY a single JSON object, no markdown fences, in this exact shape:
+    {"text": "<the reply>"}
+
+  agent: final_answer_enrichment_agent
+
+answer_enrichment_task:
+  description: >
+    Decide the response format for a query result and write its narrative,
+    chart configuration (if any), and follow-up questions.
+
+  input: |
+    User question: "{{query}}"
+
+    Data schema:
+
+    {{schema}}
+
+    Query result: {{row_count}} row(s), columns {{columns}}.
+
+    Result preview (this is the full result since it is 20 rows or fewer):
+
+    {{result_preview}}
+
+    Data freshness: {{data_freshness}}
+
+  instructions: |
+    Decide the response format and write the narrative for this result, following
+    the format-selection rules in your backstory. Every format includes "text" —
+    a chart or table is always additive on top of the narrative, never a replacement
+    for it. If you include a chart, also choose which column is the category/label
+    and which column is the numeric value — pick columns that actually exist in the
+    result, and pick a sensible unit or currency label from the schema.
+
+    COMPLETENESS: when the result preview has more than one row, "text" must name
+    every row and its exact value from the result preview — the same figures the
+    table/chart use. Never summarize as "X leads, followed by Y and Z" with only
+    the leader's number attached; state each row's value. This applies regardless
+    of row count within the preview (it's capped at 20 rows, so every row shown
+    must be covered) — never silently drop a row.
+
+    DATA FRESHNESS: only mention "Data freshness" above when the question was
+    about "today"/"currently"/"this week"/"latest"/similar AND the latest available
+    date it names is earlier than today's date — say the figures are as of that
+    latest available date, not literally today. Otherwise don't mention data
+    freshness at all.
+
+    EMPTY RESULT (0 rows): the query ran successfully but nothing matched. Set
+    "format" to "text" (never a table/chart for an empty result) and write ONE
+    short, friendly sentence saying no data was found for the question's filters.
+    Suggest one concrete next step: a nearby period or asking a broader version
+    of the question. Never say "undefined", "NaN", "null", or expose raw column
+    names to the user.
+
+    Follow-ups: base these ONLY on the user's question and the schema above —
+    never on the specific values in the result preview.
+
+  output: |
+    Respond with ONLY a single JSON object, no markdown fences, in this exact shape:
+    {
+      "format": "text" | "text_table" | "text_table_chart",
+      "text": "<full HTML-lite narrative using <b> for emphasis — always present>",
+      "chart_type": "pie_chart" | "bar_chart" | "line_chart",
+      "title": "<short chart title>",
+      "chart": {
+        "category_column": "<exact column name from the result>",
+        "value_column": "<exact column name from the result>",
+        "unit": "<e.g. USD, count, percent>"
+      },
+      "followups": ["<follow-up question 1>", "<follow-up question 2>"]
+    }
+    Omit "chart_type", "title", and "chart" entirely unless format is "text_table_chart".
+
+  agent: final_answer_enrichment_agent
+
+followups_task:
+  description: >
+    Generate a short title for the result table plus two natural follow-up
+    questions, for a result set too large to summarize.
+
+  input: |
+    User question: "{{query}}"
+
+    Data schema:
+
+    {{schema}}
+
+  instructions: |
+    Write a short, descriptive title (4-8 words, no trailing punctuation) for
+    a table answering this question using ONLY the metric, time period, and
+    breakdown named in the user's question and the schema above. Never invent
+    a time period or breakdown the question doesn't mention.
+
+    Then generate exactly two natural follow-up questions a business user
+    would likely ask next, based ONLY on the user's question and the schema
+    above. Do not reference specific values, names, or numbers in either the
+    title or the follow-ups — this result set is too large to summarize and
+    was not shown to you.
+
+  output: |
+    Respond with ONLY a single JSON object of this exact shape:
+    {"title": "<short table title>", "followups": ["<follow-up question 1>", "<follow-up question 2>"]}
+
+  agent: final_answer_enrichment_agent
+
+schema_discovery_task:
+  description: >
+    Given the header row, inferred dtypes, and a few sample rows of every
+    table just uploaded for a project, propose a column schema per table,
+    the relationships between tables, a project-level data context, and a
+    handful of reusable SQL query patterns — all from that same sample —
+    for the user to review before it's persisted.
+
+  input: |
+    Project: "{{project_name}}"
+
+    Tables (name, column names, pandas dtypes, and up to {{sample_row_count}}
+    sample rows per table):
+
+    {{tables_preview}}
+
+  instructions: |
+    For EVERY table listed above, first classify its "type":
+    - "fact": rows represent events/transactions and the table mostly holds
+      foreign keys and numeric measures.
+    - "dimension": rows represent entities/lookups referenced by other
+      tables (relatively few, mostly descriptive columns).
+    When genuinely unclear, default to "dimension".
+
+    Then propose a column schema:
+    - "data_type": a simple, human-readable type — "integer", "decimal",
+      "text", "date", "datetime", or "boolean" — inferred from the dtype and
+      sample values, not the raw pandas dtype string.
+    - "nullable": true unless every sample value is present AND the column
+      name/position strongly implies it's a required key or core fact (e.g.
+      an id-like first column). Default to true when unsure.
+    - "key_type": "PK" when the column looks like this table's unique
+      identifier (an id-like name with all-unique sample values), "FK" when
+      it looks like it references another table's primary key, else null.
+    - "references": when "key_type" is "FK", the table it references as
+      "<table>.<column>"; otherwise omit this field.
+    - "description": one short, plain sentence describing what the column
+      holds, written for a business user, not a data engineer.
+    - "samples": up to 3 of the distinct sample values you were shown for
+      that column, formatted as plain strings.
+
+    Then propose relationships between tables — ONLY when a column name and
+    its sample values plausibly reference another table's primary key
+    (shared id-like column name, overlapping sample values, or singular/
+    plural naming between the two tables). Never invent a relationship your
+    evidence doesn't support; it is fine to return an empty relationships
+    list.
+
+    -- Project-level data context --------------------------------------------
+    Write ONE short paragraph describing what this project's data actually
+    is, in plain business language, based only on the table names, column
+    names, and sample values you were shown (e.g. "transaction-level sales
+    records for a retail business, with a lookup table of store locations").
+    Then note:
+    - "currency": the currency code implied by any monetary-looking column
+      (symbols, column names like amount/price/revenue/cost, or sample
+      values), or null if none is evident.
+    - "time_grain": "daily" | "monthly" | "transactional" (irregular,
+      multiple rows per entity with no fixed cadence) | "unknown" — based on
+      whether a date/datetime column exists and how its sample values look.
+    - "notes": a short list of any caveats a query-writer should know from
+      what you can actually see in the sample — e.g. a column that looks
+      like a running/cumulative total rather than a per-row delta, a
+      status/category column whose sample values suggest messy free text
+      rather than a clean fixed set, or a column that appears to reset
+      periodically. Leave this an empty list rather than inventing a caveat
+      your evidence doesn't support.
+
+    -- Reusable SQL query patterns -------------------------------------------
+    Propose 3-8 generic, reusable query patterns that fit THIS data —
+    never domain-specific boilerplate copied from some other dataset. Each
+    pattern should generalize across many similar questions a user might
+    ask, not answer one specific question. Ground every pattern in columns
+    that actually exist:
+    - Only propose a trend-over-time pattern if a date/datetime column
+      exists.
+    - Only propose a join-based pattern if the relationship it needs is in
+      the relationships list above — name every table it touches in
+      "tables_involved" and give the join condition in "join_hint" as
+      "<table>.<column> = <table>.<column>".
+    - Favor patterns business users actually ask for: aggregate-by-category,
+      top-N ranking, period-over-period comparison, running totals, simple
+      lookups/enrichment across a join, counting distinct entities. Only
+      include a pattern type that this data actually supports.
+    - "sql_template" is a skeleton SELECT (SQLite dialect) with placeholders
+      in angle brackets (e.g. <start_date>, <category_column>) — illustrative,
+      not meant to run as-is.
+
+  output: |
+    Respond with ONLY a single JSON object, no markdown fences, in this exact shape:
+    {
+      "tables": [
+        {
+          "name": "<exact table name as given>",
+          "type": "fact" | "dimension",
+          "columns": [
+            {
+              "name": "<exact column name as given>",
+              "data_type": "integer" | "decimal" | "text" | "date" | "datetime" | "boolean",
+              "nullable": true | false,
+              "key_type": "PK" | "FK" | null,
+              "references": "<table.column, only when key_type is FK>",
+              "description": "<one short sentence>",
+              "samples": ["<value>", "..."]
+            }
+          ]
+        }
+      ],
+      "relationships": [
+        {
+          "from_table": "<table name>",
+          "from_column": "<column name>",
+          "to_table": "<table name>",
+          "to_column": "<column name>",
+          "cardinality": "one-to-one" | "one-to-many" | "many-to-one" | "many-to-many"
+        }
+      ],
+      "data_context": {
+        "description": "<one paragraph>",
+        "currency": "<code, or null>",
+        "time_grain": "daily" | "monthly" | "transactional" | "unknown",
+        "notes": ["<caveat>", "..."]
+      },
+      "patterns": [
+        {
+          "pattern_id": "PATTERN_1",
+          "name": "<short name>",
+          "purpose": "<one sentence>",
+          "use_when": ["<example phrasing a user might type>", "..."],
+          "tables_involved": ["<table name>", "..."],
+          "join_hint": "<table.column = table.column, or null if single-table>",
+          "sql_template": "<skeleton SELECT with <placeholder> tokens>"
+        }
+      ]
+    }
+    Omit "references" entirely on any column whose "key_type" is not "FK".
+    Include every table you were given, in the same order. Keep "relationships"
+    and "patterns" empty arrays, and "notes" an empty list, if nothing is
+    well-supported by the evidence shown — never pad with invented entries.
+
+  agent: schema_relation_builder_agent
+
+intention_classification_task:
+  description: >
+    Pre-routing step: decide whether the user's question should be answered
+    from the internal SQLite database or from a registered external URL source.
+    External is chosen ONLY when the query contains an explicit trigger word.
+
+  input: |
+    User question: "{{query}}"
+
+    Registered external sources (key_name, description, link):
+    {{external_sources}}
+
+    Conversation history (last turn only, for reference resolution):
+    {{memory_context}}
+
+  instructions: |
+    Return "external" ONLY when the question contains at least one of these
+    EXPLICIT triggers:
+      1. The word "external" appears anywhere in the question.
+      2. The exact key_name of a registered source appears verbatim
+         (e.g. "cbsl_rates", "census_data").
+
+    Return "internal" in ALL other cases — including when the question topic
+    happens to match a source description but neither trigger word is present.
+
+    When returning "external", set "source_key" to the matching key_name.
+    If multiple sources match by key_name, pick the closest literal match.
+    The default is always "internal".
+
+  output: |
+    Respond with ONLY a single JSON object, no markdown fences:
+    {
+      "intent": "internal" | "external",
+      "source_key": "<key_name if intent is external, else null>",
+      "reasoning": "<one short sentence>"
+    }
+
+  agent: data_processing_agent
+
+external_query_task:
+  description: >
+    Answer a question using content fetched live from a registered external URL
+    (web page, Excel/CSV, or PDF). When internal comparison data is also
+    provided, compute the difference between the two.
+
+  input: |
+    User question: "{{query}}"
+
+    Source key: {{source_key}}
+    Source description: {{source_description}}
+
+    Content fetched from the external URL (web page text, table rows, or PDF
+    extract — use this as the primary source of truth):
+    {{data_slice}}
+
+    Internal dataset result (rows from the internal SQLite database — present only
+    when the question asks for a comparison between internal and external data):
+    {{internal_data}}
+
+  instructions: |
+    Answer the question using the fetched external content above.
+
+    Determine whether this is a COMPARISON question (asks to compare, contrast,
+    find the difference, or measure the gap between internal and external data).
+
+    IF it is a comparison AND "Internal dataset result" is non-empty:
+      - Present the external figures and the internal figures side by side.
+      - Compute and state the numerical difference. State units clearly.
+      - Do NOT say "no comparison data was provided".
+
+    IF it is NOT a comparison, or internal data is empty/absent:
+      - Answer solely from the fetched external content.
+      - Do not fabricate figures not present in the content.
+
+    In all cases:
+      - Write a short, clear, business-friendly answer (3-6 sentences).
+      - Include exact figures from the content. Mention the source key but
+        do NOT mention URLs, file names, or sheet names.
+      - If the fetched content is empty or unrelated to the question, say
+        so clearly and suggest the user check the source URL directly.
+      - NEVER mention that internal data was absent or unavailable — if
+        it is not present, simply answer from the external content alone.
+
+  output: |
+    Respond with ONLY a single JSON object, no markdown fences:
+    {
+      "text": "<the answer as HTML-lite with <b> for emphasis>",
+      "followups": ["<follow-up question 1>", "<follow-up question 2>"]
+    }
+
+  agent: final_answer_enrichment_agent
