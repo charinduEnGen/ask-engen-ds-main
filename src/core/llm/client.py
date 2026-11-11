@@ -231,8 +231,16 @@ def _call_openrouter_public(
     if static_context:
         user = f"{static_context}\n\n{user}"
 
-    active_model = token_tracker.get_active_model()
-    console_log(mode, "OPENROUTER", f"model={active_model}")
+    estimated = _estimate_tokens(system) + _estimate_tokens(user)
+    # Raise early if the prompt exceeds every model's safe context window.
+    max_context = max(m["context_window"] for m in token_tracker.PUBLIC_MODEL_POOL)
+    if estimated > max_context * 0.90:
+        raise TokenLimitExceededError(
+            f"Prompt (~{estimated} tokens) exceeds the largest public-mode model's context window ({max_context})"
+        )
+
+    active_model = token_tracker.get_active_model(estimated)
+    console_log(mode, "OPENROUTER", f"model={active_model}, estimated_input={estimated}")
     result = call_openrouter(system, user, active_model, max_tokens)
     token_tracker.add_tokens(active_model, result.input_tokens + result.output_tokens)
     return result

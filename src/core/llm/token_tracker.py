@@ -17,12 +17,16 @@ _USAGE_FILE = DATA_DIR / "token_usage.json"
 _ROTATION_THRESHOLD = 0.75
 
 # Rotation order: Gemma → Nemotron Ultra → Nemotron Lightning.
-# weekly_limit values are the OpenRouter free-tier weekly caps in tokens.
+# weekly_limit: OpenRouter free-tier weekly caps in tokens.
+# context_window: model's actual context window in tokens.
 PUBLIC_MODEL_POOL: list[dict] = [
-    {"id": "google/gemma-4-31b-it:free",             "weekly_limit": 613_000_000},
-    {"id": "nvidia/nemotron-3-ultra-550b-a55b:free",  "weekly_limit": 3_460_000_000_000},
-    {"id": "nvidia/nemotron-3.5-lightning:free",      "weekly_limit": 1_200_000_000_000},
+    {"id": "google/gemma-4-31b-it:free",             "weekly_limit": 613_000_000,       "context_window": 262_144},
+    {"id": "nvidia/nemotron-3-ultra-550b-a55b:free",  "weekly_limit": 3_460_000_000_000, "context_window": 1_048_576},
+    {"id": "nvidia/nemotron-3.5-lightning:free",      "weekly_limit": 1_200_000_000_000, "context_window": 1_048_576},
 ]
+
+# Leave 10% headroom below the model's context window.
+_CONTEXT_SAFETY_FACTOR = 0.90
 
 
 def _iso_week() -> str:
@@ -68,12 +72,27 @@ def is_over_threshold(model_id: str, weekly_limit: int) -> bool:
     return get_weekly_usage(model_id) >= weekly_limit * _ROTATION_THRESHOLD
 
 
-def get_active_model() -> str:
-    """Return the first pool model under the 75% weekly threshold.
+def get_active_model(input_tokens: int = 0) -> str:
+    """Return the best model for a prompt of `input_tokens`.
 
-    Falls back to the last model when all are saturated (graceful degradation).
+    Selection priority:
+    1. First model that is under the 75% weekly threshold AND fits the context window.
+    2. If all are saturated: first model that fits the context window (ignore usage).
+    3. Last resort: last model in the pool.
+
+    Callers should raise TokenLimitExceededError when input_tokens exceeds every
+    model's safe context limit — that check lives in _call_openrouter_public().
     """
-    for model in PUBLIC_MODEL_POOL:
+    fits = [
+        m for m in PUBLIC_MODEL_POOL
+        if input_tokens <= m["context_window"] * _CONTEXT_SAFETY_FACTOR
+    ]
+    # Preferred: fits context AND under weekly threshold
+    for model in fits:
         if not is_over_threshold(model["id"], model["weekly_limit"]):
             return model["id"]
+    # Fallback: fits context, ignore saturation
+    if fits:
+        return fits[0]["id"]
+    # Last resort: largest context model (Nemotron Ultra)
     return PUBLIC_MODEL_POOL[-1]["id"]
