@@ -125,6 +125,9 @@ class Settings(BaseSettings):
     # turn, so it gets its own longer timeout instead of the ~25s default
     # tuned for live chat latency (see src.orchestrator.llm_gate.call_llm_guarded).
     schema_discovery_timeout_seconds: float = 90.0
+    # Public (OpenRouter free-tier) calls are slower than Gemini/Anthropic.
+    # Free models routinely take 30-60s; this gives them enough headroom.
+    public_llm_call_timeout_seconds: float = 300.0
 
 
 settings = Settings()

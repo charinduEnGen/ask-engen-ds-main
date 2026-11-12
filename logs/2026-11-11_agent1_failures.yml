@@ -1,0 +1,25 @@
+- timestamp: '2026-11-11T15:07:19.738721+00:00'
+  user_id: 6af19670075eefde3f2e29f3
+  session_id: 0eed9e15-2989-47e4-a8fa-504a6763f34e
+  answer_id: ans_20261111_150558_6e275f
+  mode: analytics
+  query: hey
+  scope_category: system_error
+  out_of_scope_reason: repeated malformed responses or failing code across every retry
+    attempt
+  attempts:
+  - attempt: 1
+    failure: invalid_json
+    raw_text: ''
+    error: 'TOOL_ERROR: response was not valid JSON: Expecting value: line 1 column
+      1 (char 0)'
+  - attempt: 2
+    failure: invalid_json
+    raw_text: ''
+    error: 'TOOL_ERROR: response was not valid JSON: Expecting value: line 1 column
+      1 (char 0)'
+  - attempt: 3
+    failure: invalid_json
+    raw_text: ''
+    error: 'TOOL_ERROR: response was not valid JSON: Expecting value: line 1 column
+      1 (char 0)'

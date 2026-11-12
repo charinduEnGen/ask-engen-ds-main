@@ -24,6 +24,8 @@ from typing import Callable, TypeVar
 
 from fastapi import HTTPException
 
+from src.config import settings
+
 T = TypeVar("T")
 
 _LLM_SEMAPHORE_LIMIT = 5
@@ -33,6 +35,19 @@ _CALL_TIMEOUT_SECONDS = 25.0
 _llm_semaphore = asyncio.Semaphore(_LLM_SEMAPHORE_LIMIT)
 
 _in_flight = 0
+
+
+def get_call_timeout(mode: str) -> float:
+    """Return the appropriate LLM call timeout for the given mode.
+
+    Public mode uses OpenRouter free-tier models which are significantly
+    slower than Gemini/Anthropic; they need a longer gate timeout.
+    """
+    from src.core.llm import store as llm_store
+
+    if llm_store.get_mode(mode) == "public":
+        return settings.public_llm_call_timeout_seconds
+    return _CALL_TIMEOUT_SECONDS
 
 
 async def call_llm_guarded(func: Callable[..., T], *args, call_timeout: float = _CALL_TIMEOUT_SECONDS, **kwargs) -> T:

@@ -16,12 +16,12 @@ _lock = threading.Lock()
 _USAGE_FILE = DATA_DIR / "token_usage.json"
 _ROTATION_THRESHOLD = 0.75
 
-# Rotation order: Nemotron Ultra → Nemotron Lightning.
+# Rotation order: Nemotron Lightning → Nemotron Ultra.
 # weekly_limit: OpenRouter free-tier weekly caps in tokens.
 # context_window: model's actual context window in tokens.
 PUBLIC_MODEL_POOL: list[dict] = [
-    {"id": "nvidia/nemotron-3-ultra-550b-a55b:free",  "weekly_limit": 3_460_000_000_000, "context_window": 1_048_576},
     {"id": "nvidia/nemotron-3.5-lightning:free",      "weekly_limit": 1_200_000_000_000, "context_window": 1_048_576},
+    {"id": "nvidia/nemotron-3-ultra-550b-a55b:free",  "weekly_limit": 3_460_000_000_000, "context_window": 1_048_576},
 ]
 
 # Leave 10% headroom below the model's context window.
@@ -93,5 +93,5 @@ def get_active_model(input_tokens: int = 0) -> str:
     # Fallback: fits context, ignore saturation
     if fits:
         return fits[0]["id"]
-    # Last resort: largest context model (Nemotron Ultra)
+    # Last resort: Nemotron Ultra
     return PUBLIC_MODEL_POOL[-1]["id"]

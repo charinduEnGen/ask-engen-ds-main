@@ -13,7 +13,7 @@ import pandas as pd
 from sqlalchemy.engine import Engine
 
 from src.config import settings
-from src.core.llm.gate import call_llm_guarded, run_pandas_exec
+from src.core.llm.gate import call_llm_guarded, get_call_timeout, run_pandas_exec
 from src.services.analytics.tools import response_builder
 from src.services.analytics.tools.sql_query_tool import execute_sql_query
 from src.utils import kb_loader, masking, prompt_loader
@@ -95,6 +95,7 @@ async def run_data_processing_agent(
             mode,
             system_prompt,
             user_prompt,
+            call_timeout=get_call_timeout(mode),
             gemini_model=settings.gemini_model_data_processing,
             gemini_static_context=gemini_static_context,
         )
@@ -223,7 +224,7 @@ async def run_out_of_scope_response_agent(
         data_freshness=kb_loader.data_freshness_note(mode),
     )
 
-    result = await call_llm_guarded(call_llm, mode, system_prompt, prompt, gemini_model=settings.gemini_model_enrichment)
+    result = await call_llm_guarded(call_llm, mode, system_prompt, prompt, call_timeout=get_call_timeout(mode), gemini_model=settings.gemini_model_enrichment)
     await log_cost(
         user_id,
         session_id,
@@ -266,7 +267,7 @@ async def run_enrichment_agent(
         data_freshness=kb_loader.data_freshness_note(mode),
     )
 
-    result = await call_llm_guarded(call_llm, mode, system_prompt, prompt, gemini_model=settings.gemini_model_enrichment)
+    result = await call_llm_guarded(call_llm, mode, system_prompt, prompt, call_timeout=get_call_timeout(mode), gemini_model=settings.gemini_model_enrichment)
     await log_cost(
         user_id,
         session_id,
@@ -388,6 +389,7 @@ async def run_intention_classifier(
             try:
                 result = await call_llm_guarded(
                     call_llm, mode, system_prompt, prompt,
+                    call_timeout=get_call_timeout(mode),
                     gemini_model=settings.gemini_model_data_processing,
                 )
                 await log_cost(
@@ -467,6 +469,7 @@ async def run_external_query_agent(
             mode,
             system_prompt,
             prompt,
+            call_timeout=get_call_timeout(mode),
             gemini_model=settings.gemini_model_enrichment,
         )
         await log_cost(
@@ -499,7 +502,7 @@ async def run_followups_only(
     )
 
     result = await call_llm_guarded(
-        call_llm, mode, system_prompt, prompt, max_tokens=30000, gemini_model=settings.gemini_model_enrichment
+        call_llm, mode, system_prompt, prompt, max_tokens=30000, call_timeout=get_call_timeout(mode), gemini_model=settings.gemini_model_enrichment
     )
     await log_cost(
         user_id,
@@ -563,6 +566,7 @@ async def run_rag_query_agent(
             mode,
             system_prompt,
             user_prompt,
+            call_timeout=get_call_timeout(mode),
             gemini_model=settings.gemini_model_enrichment,
         )
         await log_cost(

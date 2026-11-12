@@ -79,8 +79,18 @@ def call_openrouter(system: str, user: str, model: str, max_tokens: int) -> LLMR
     data = resp.json()
     choice = data["choices"][0]
     usage = data.get("usage", {})
+    content = choice["message"].get("content") or ""
+    if not content:
+        # Some free models return null content (e.g. refusals, tool-call-only
+        # responses). Treat it as an empty response so callers get a string.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "OpenRouter returned null/empty content for model=%s finish_reason=%s",
+            model,
+            choice.get("finish_reason"),
+        )
     return LLMResult(
-        text=choice["message"]["content"],
+        text=content,
         input_tokens=usage.get("prompt_tokens", 0),
         output_tokens=usage.get("completion_tokens", 0),
         model=model,
