@@ -22,13 +22,13 @@ import html
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 import yaml
 from fastapi import APIRouter, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.config import COSTS_DIR, LOGS_DIR, settings
 
@@ -718,6 +718,145 @@ def _render_page(
 # --------------------------------------------------------------------------
 # Route
 # --------------------------------------------------------------------------
+
+
+def _compact(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+_PERIOD_HOURS: dict[str, int] = {"24h": 24, "7d": 168, "30d": 720}
+_PERIOD_LABELS: dict[str, str] = {"24h": "Last 24 Hours", "7d": "Last 7 Days", "30d": "Last 30 Days"}
+
+_MODE_DISPLAY: dict[str, str] = {
+    "analytics": "DataPulse",
+}
+
+
+def _mode_label(mode: str) -> str:
+    return _MODE_DISPLAY.get((mode or "").lower(), mode or "—")
+
+
+@router.get("/dashboard/telemetry", response_class=JSONResponse)
+async def dashboard_telemetry(
+    period: str = Query("24h", description="24h | 7d | 30d"),
+) -> JSONResponse:
+    """JSON telemetry consumed by the React dashboard — per-user usage stats,
+    throughput sparkline, and period summaries. Uses the same JSONL log files
+    as the HTML dashboard; no database involved."""
+    hours = _PERIOD_HOURS.get(period, 24)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours)
+    cutoff_date = cutoff.strftime("%Y-%m-%d")
+
+    raw_cost = _load_entries(COSTS_DIR)
+    raw_log = _load_entries(LOGS_DIR)
+
+    cost_entries = [e for e in raw_cost if e["date"] >= cutoff_date]
+    log_entries = [e for e in raw_log if e["date"] >= cutoff_date]
+
+    # --- per-user aggregation -------------------------------------------------
+    usage: dict[str, dict] = {}
+
+    def _get_user(uid: str) -> dict:
+        if uid not in usage:
+            usage[uid] = {
+                "totalRequests": 0,
+                "tokensIn": 0,
+                "tokensOut": 0,
+                "totalTimeMs": 0,
+                "lastActivityAt": None,
+                "modes": set(),
+            }
+        return usage[uid]
+
+    for e in cost_entries:
+        u = _get_user(e.get("user_id") or _UNKNOWN)
+        u["tokensIn"] += int(e.get("input_tokens") or 0)
+        u["tokensOut"] += int(e.get("output_tokens") or 0)
+
+    for e in log_entries:
+        u = _get_user(e.get("user_id") or _UNKNOWN)
+        u["totalRequests"] += 1
+        u["totalTimeMs"] += round(float(e.get("total_seconds") or 0) * 1000)
+        ts = e.get("timestamp") or ""
+        if ts and (not u["lastActivityAt"] or ts > u["lastActivityAt"]):
+            u["lastActivityAt"] = ts
+        mode = e.get("mode") or _UNKNOWN
+        u["modes"].add(mode)
+
+    usage_out: dict[str, dict] = {}
+    for uid, u in usage.items():
+        modes = list(u["modes"])
+        last_mode = modes[0] if modes else None
+        usage_out[uid] = {
+            "totalRequests": u["totalRequests"],
+            "tokensIn": u["tokensIn"],
+            "tokensOut": u["tokensOut"],
+            "totalTimeMs": u["totalTimeMs"],
+            "lastActivityAt": u["lastActivityAt"],
+            "lastMode": last_mode,
+            "lastModeLabel": _mode_label(last_mode or ""),
+            "modes": modes,
+        }
+
+    # --- throughput sparkline (24 hourly buckets, oldest → newest) -----------
+    hourly: dict[int, int] = defaultdict(int)
+    for e in log_entries:
+        ts_raw = e.get("timestamp") or ""
+        if not ts_raw:
+            continue
+        try:
+            t = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            age_h = int((now - t).total_seconds() / 3600)
+            if 0 <= age_h < 24:
+                hourly[23 - age_h] += 1
+        except (ValueError, OverflowError):
+            pass
+
+    throughput = [{"hour": i, "requests": hourly.get(i, 0)} for i in range(24)]
+
+    # --- period summaries for all three tiles --------------------------------
+    period_summaries: dict[str, dict] = {}
+    for pk, ph in _PERIOD_HOURS.items():
+        c_date = (now - timedelta(hours=ph)).strftime("%Y-%m-%d")
+        p_logs = [e for e in raw_log if e["date"] >= c_date]
+        p_costs = [e for e in raw_cost if e["date"] >= c_date]
+        req = len(p_logs)
+        tin = sum(int(e.get("input_tokens") or 0) for e in p_costs)
+        tout = sum(int(e.get("output_tokens") or 0) for e in p_costs)
+        period_summaries[pk] = {
+            "key": pk,
+            "label": _PERIOD_LABELS[pk],
+            "requests": req,
+            "tokens": tin + tout,
+            "requestsLabel": _compact(req),
+            "tokensLabel": _compact(tin + tout),
+        }
+
+    return JSONResponse(
+        content={
+            "source": "ds",
+            "monitoring": {
+                "title": "System & User Monitoring",
+                "version": "v2.3.8-stable",
+                "status": "active",
+                "statusLabel": "Active · Running",
+                "description": (
+                    "Audits user queries, token consumption, inference execution "
+                    "time and model calls in real time."
+                ),
+            },
+            "throughput": throughput,
+            "periodSummaries": period_summaries,
+            "usageByUser": usage_out,
+        }
+    )
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
