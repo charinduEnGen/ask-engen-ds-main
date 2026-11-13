@@ -194,12 +194,12 @@ async def run_query_pipeline(
         )
         return response
 
-    if intention.intent == "external" and intention.source_key:
-        console_log(mode, "ROUTE", f"external intent detected: source_key={intention.source_key}")
+    if intention.intent in ("external", "both") and intention.source_key:
+        console_log(mode, "ROUTE", f"{intention.intent} intent detected: source_key={intention.source_key}")
 
         internal_df: pd.DataFrame | None = None
-        if _is_comparison_query(effective_query):
-            console_log(mode, "ROUTE", "comparison query detected — fetching internal data for cross-source diff")
+        if intention.intent == "both" or _is_comparison_query(effective_query):
+            console_log(mode, "ROUTE", "fetching internal data to combine with external source")
             with timer.track("internal_for_comparison"):
                 try:
                     internal_outcome = await steps.run_data_processing_agent(
@@ -607,10 +607,10 @@ async def run_sql_stage(
         )
         return SqlStageResponse(answer_id=answer_id, question_id=question_id, is_complete=True, response=response)
 
-    if intention.intent == "external" and intention.source_key:
-        console_log(mode, "SQL_STAGE", f"external intent source_key={intention.source_key} — resolving inline")
+    if intention.intent in ("external", "both") and intention.source_key:
+        console_log(mode, "SQL_STAGE", f"{intention.intent} intent source_key={intention.source_key} — resolving inline")
         internal_df: pd.DataFrame | None = None
-        if _is_comparison_query(user_request.query):
+        if intention.intent == "both" or _is_comparison_query(user_request.query):
             engine = get_engine(mode)
             try:
                 internal_outcome = await steps.run_data_processing_agent(

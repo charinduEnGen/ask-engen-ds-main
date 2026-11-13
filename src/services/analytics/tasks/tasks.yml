@@ -429,8 +429,8 @@ schema_discovery_task:
 intention_classification_task:
   description: >
     Pre-routing step: decide whether the user's question should be answered
-    from the internal SQLite database or from a registered external URL source.
-    External is chosen ONLY when the query contains an explicit trigger word.
+    from the internal SQLite database, from a registered external URL source,
+    or from BOTH sources together (comparison / benchmark queries).
 
   input: |
     User question: "{{query}}"
@@ -442,24 +442,38 @@ intention_classification_task:
     {{memory_context}}
 
   instructions: |
-    Return "external" ONLY when the question contains at least one of these
-    EXPLICIT triggers:
-      1. The word "external" appears anywhere in the question.
-      2. The exact key_name of a registered source appears verbatim
-         (e.g. "cbsl_rates", "census_data").
+    Classify the question into one of three intents: "internal", "external", or "both".
 
-    Return "internal" in ALL other cases — including when the question topic
-    happens to match a source description but neither trigger word is present.
+    Rules — apply in order, stop at the first match:
 
-    When returning "external", set "source_key" to the matching key_name.
+    1. Return "both" when ALL of the following are true:
+       - An external source is explicitly referenced (the word "external", a
+         registered key_name, or a prior conversation turn already pulled from
+         an external source).
+       - The question also asks to compare, benchmark, contrast, measure the
+         gap, or combine the external figure with something from the internal
+         database (e.g. "compare our sales vs cbsl_rates", "how does our
+         revenue compare to the external benchmark", "gap between our figures
+         and cbsl_rates").
+       Set "source_key" to the matching key_name.
+
+    2. Return "external" when the question references an external source
+       (word "external", a registered key_name, or memory shows a prior
+       external turn) but does NOT ask to combine it with internal data.
+       Set "source_key" to the matching key_name.
+
+    3. Return "internal" in ALL other cases — including when the topic
+       happens to match a source description but no trigger is present.
+       Set "source_key" to null.
+
     If multiple sources match by key_name, pick the closest literal match.
     The default is always "internal".
 
   output: |
     Respond with ONLY a single JSON object, no markdown fences:
     {
-      "intent": "internal" | "external",
-      "source_key": "<key_name if intent is external, else null>",
+      "intent": "internal" | "external" | "both",
+      "source_key": "<key_name if intent is external or both, else null>",
       "reasoning": "<one short sentence>"
     }
 

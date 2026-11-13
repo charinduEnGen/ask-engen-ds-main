@@ -367,10 +367,19 @@ async def run_intention_classifier(
         memory_trigger = any(
             _key_matches_in(s.get("key_name", ""), mem_lower) for s in sources
         )
-        explicit_trigger = "external" in q_lower or any(_key_matches(s.get("key_name", "")) for s in sources) or memory_trigger
+
+        # direct_trigger: user explicitly named the source or said "external" in THIS query.
+        # memory_trigger alone should NOT bypass the LLM — it only helps the LLM decide.
+        direct_trigger = (
+            "external" in q_lower
+            or any(_key_matches(s.get("key_name", "")) for s in sources)
+        )
+        explicit_trigger = direct_trigger or memory_trigger
 
         if explicit_trigger:
-            if len(sources) == 1:
+            # Fast-path: skip LLM only when user directly named the source in this query.
+            # If memory_trigger is the only reason, let the LLM decide instead.
+            if len(sources) == 1 and direct_trigger:
                 matched_key = sources[0]["key_name"]
                 console_log(mode, "INTENTION", f"intent=external source_key={matched_key} (single source, explicit trigger)")
                 return IntentionOutcome(intent="external", source_key=matched_key, reasoning="explicit external trigger in query")
@@ -401,8 +410,8 @@ async def run_intention_classifier(
                 source_key = decision.get("source_key")
                 reasoning = decision.get("reasoning", "")
                 console_log(mode, "INTENTION", f"intent={intent} source_key={source_key} reason={reasoning!r}")
-                if intent == "external" and source_key:
-                    return IntentionOutcome(intent="external", source_key=source_key, reasoning=reasoning)
+                if intent in ("external", "both") and source_key:
+                    return IntentionOutcome(intent=intent, source_key=source_key, reasoning=reasoning)
             except Exception as exc:  # noqa: BLE001
                 console_log(mode, "INTENTION", f"classifier failed ({exc}), falling through to rag/internal")
 
